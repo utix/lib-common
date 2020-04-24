@@ -19,4 +19,5 @@
 
 ctx.recurse([
     'iop-tutorial',
+    'test',
 ])
