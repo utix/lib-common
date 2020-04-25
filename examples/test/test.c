@@ -19,6 +19,7 @@
 #include <lib-common/parseopt.h>
 #include <lib-common/el.h>
 #include <lib-common/http.h>
+#include <lib-common/datetime.h>
 
 
 static struct {
@@ -34,6 +35,10 @@ static struct {
     int  fire;
     int  ok;
     int  error;
+    uint64_t min;
+    uint64_t max;
+    uint64_t sum;
+    uint64_t count;
 
 } _G;
 
@@ -60,45 +65,45 @@ static void client_create(const char *s)
     e_info("Client created");
     httpc_cfg_init(&_G.cfg);
     _G.cfg.refcnt++;
-    _G.cfg.max_queries = 10;
+    _G.cfg.max_queries = 100;
     my_addr_resolve(s, &su);
     _G.client = httpc_connect(&su, &_G.cfg, NULL);
 }
 
 static int query_on_hdrs(httpc_query_t *q) {
-    e_info("on headers");
     return 0;
 }
 static int query_on_data(httpc_query_t *q, pstream_t ps)
 {
-    e_info("on data");
-    e_info("data  %*pM", SB_FMT_ARG(&q->payload));
-    e_info("data ps %*pM", PS_FMT_ARG(&ps));
+    uint64_t response_time;
     if (q->qinfo) {
-        e_info("%d", q->qinfo->code);
         if (q->qinfo->code >= 200 && q->qinfo->code < 400) {
             _G.ok++;
         } else {
             _G.error++;
         }
     }
+    response_time = lp_getmsec() - (uint64_t)q->pdata;
+    _G.min = MIN(_G.min, response_time);
+    _G.max = MAX(_G.max, response_time);
+    _G.sum += response_time;
+    _G.count++;
     return 0;
 }
 static void query_on_done(httpc_query_t *q, httpc_status_t status)
 {
-    e_info("done  %*pM", SB_FMT_ARG(&q->payload));
 }
 
 static int fire(void)
 {
     httpc_query_t *query = malloc(sizeof(httpc_query_t));
     _G.fire++;
-    if (!_G.client) {
+    if (!_G.client || !_G.client->ev) {
         e_error("No client");
         client_create(_G.uri.s);
         return -1;
     }
-    if (_G.client->max_queries <= 0 || ! _G.client->ev) {
+    if (_G.client->max_queries <= 0) {
         e_error("%d", _G.client->max_queries);
         client_create(_G.uri.s);
         return -1;
@@ -113,6 +118,7 @@ static int fire(void)
     httpc_query_start(query, HTTP_METHOD_GET, _G.host, LSTR_IMMED_V("/"));
     httpc_query_hdrs_done(query, 0, false);
     httpc_query_done(query);
+    query->pdata = (void *)lp_getmsec();
     return 0;
 }
 /*}}}*/
@@ -130,14 +136,18 @@ static void on_term(el_t idx, int signum, data_t priv)
     exit(0);
 }
 
+static void my_kill(el_t elh, data_t priv)
+{
+    exit(0);
+}
 static void stats(el_t elh, data_t priv)
 {
-    e_info("%03d %03d %03d", _G.fire, _G.ok, _G.error);
+    e_info("%03d %03d %03d %03ju %03ju %03ju", _G.fire, _G.ok, _G.error,
+           _G.min, _G.count ? _G.sum/_G.count:0, _G.max);
     _G.fire = _G.ok = _G.error = 0;
 }
 static void slice_hook(el_t elh, data_t priv)
 {
-    e_info("fire");
     fire();
 }
 
@@ -156,13 +166,15 @@ int main(int argc, char **argv)
         e_notice("HELLO - Version 1.0");
         return EXIT_SUCCESS;
     }
+    _G.min = UINT64_MAX;
     client_create(argv[0]);
     fire();
     el_signal_register(SIGTERM, &on_term, NULL);
     el_signal_register(SIGINT,  &on_term, NULL);
     el_signal_register(SIGQUIT, &on_term, NULL);
-    el_timer_register(2000, 100, EL_TIMER_LOWRES, &slice_hook, NULL);
+    el_timer_register(2000, 10, EL_TIMER_LOWRES, &slice_hook, NULL);
     el_timer_register(0, 1000, EL_TIMER_LOWRES, &stats, NULL);
+    el_timer_register(30000, 0, EL_TIMER_LOWRES, &my_kill, NULL);
 
 
     /* got into event loop */
