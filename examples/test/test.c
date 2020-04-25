@@ -25,7 +25,6 @@
 static struct {
     bool is_closing;
 
-    httpc_cfg_t cfg;
     httpc_t *client;
     lstr_t host;
     lstr_t uri;
@@ -64,18 +63,19 @@ static void query_done(httpc_t *c, const httpc_query_t *q, int status)
 }
 static void client_create(const char *s)
 {
+    httpc_cfg_t *cfg;
     sockunion_t su;
 
     if (_G.client) {
         obj_release(_G.client);
     }
-    httpc_cfg_init(&_G.cfg);
-    _G.cfg.refcnt++;
-    _G.cfg.max_queries = 100;
+    cfg = httpc_cfg_new();
+    cfg->max_queries = 1000;
     my_addr_resolve(s, &su);
-    _G.client = httpc_connect(&su, &_G.cfg, NULL);
+    _G.client = httpc_connect(&su, cfg, NULL);
     _G.client->on_query_done = &query_done;
     obj_retain(_G.client);
+    httpc_cfg_release(&cfg);
 }
 
 static int query_on_hdrs(httpc_query_t *q) {
@@ -100,23 +100,28 @@ static void query_on_done(httpc_query_t *q, httpc_status_t status)
     p_delete(&q);
 }
 
-static int fire(void)
-{
+static void fire_one(httpc_t *c) {
     httpc_query_t *query = p_new(httpc_query_t, 1);
-    _G.fire++;
-    if (!_G.client || !_G.client->ev || _G.client->max_queries <= 0) {
-        client_create(_G.uri.s);
-    }
     httpc_query_init(query);
     httpc_bufferize(query, 40 << 20);
     query->on_done = &query_on_done;
     query->on_hdrs = &query_on_hdrs;
 
-    httpc_query_attach(query, _G.client);
+    httpc_query_attach(query, c);
     httpc_query_start(query, HTTP_METHOD_GET, _G.host, LSTR_IMMED_V("/"));
     httpc_query_hdrs_done(query, 0, false);
     httpc_query_done(query);
     query->pdata = (void *)lp_getmsec();
+    _G.fire++;
+}
+static int fire(void)
+{
+    for (int i = 0; i < 100; i++) {
+        if (!_G.client || !_G.client->ev || _G.client->max_queries <= 0) {
+            client_create(_G.uri.s);
+        }
+        fire_one(_G.client);
+    }
     return 0;
 }
 /*}}}*/
