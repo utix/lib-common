@@ -59,21 +59,29 @@ static void my_addr_resolve(const char *s, sockunion_t *out)
 
 /* }}} */
 /*{{{ client */
+static void query_done(httpc_t *c, const httpc_query_t *q, int status)
+{
+}
 static void client_create(const char *s)
 {
     sockunion_t su;
-    e_info("Client created");
+
+    if (_G.client) {
+        obj_release(_G.client);
+    }
     httpc_cfg_init(&_G.cfg);
     _G.cfg.refcnt++;
     _G.cfg.max_queries = 100;
     my_addr_resolve(s, &su);
     _G.client = httpc_connect(&su, &_G.cfg, NULL);
+    _G.client->on_query_done = &query_done;
+    obj_retain(_G.client);
 }
 
 static int query_on_hdrs(httpc_query_t *q) {
     return 0;
 }
-static int query_on_data(httpc_query_t *q, pstream_t ps)
+static void query_on_done(httpc_query_t *q, httpc_status_t status)
 {
     uint64_t response_time;
     if (q->qinfo) {
@@ -88,30 +96,20 @@ static int query_on_data(httpc_query_t *q, pstream_t ps)
     _G.max = MAX(_G.max, response_time);
     _G.sum += response_time;
     _G.count++;
-    return 0;
-}
-static void query_on_done(httpc_query_t *q, httpc_status_t status)
-{
+    httpc_query_wipe(q);
+    p_delete(&q);
 }
 
 static int fire(void)
 {
-    httpc_query_t *query = malloc(sizeof(httpc_query_t));
+    httpc_query_t *query = p_new(httpc_query_t, 1);
     _G.fire++;
-    if (!_G.client || !_G.client->ev) {
-        e_error("No client");
+    if (!_G.client || !_G.client->ev || _G.client->max_queries <= 0) {
         client_create(_G.uri.s);
-        return -1;
-    }
-    if (_G.client->max_queries <= 0) {
-        e_error("%d", _G.client->max_queries);
-        client_create(_G.uri.s);
-        return -1;
     }
     httpc_query_init(query);
     httpc_bufferize(query, 40 << 20);
     query->on_done = &query_on_done;
-    query->on_data = &query_on_data;
     query->on_hdrs = &query_on_hdrs;
 
     httpc_query_attach(query, _G.client);
@@ -174,7 +172,7 @@ int main(int argc, char **argv)
     el_signal_register(SIGQUIT, &on_term, NULL);
     el_timer_register(2000, 10, EL_TIMER_LOWRES, &slice_hook, NULL);
     el_timer_register(0, 1000, EL_TIMER_LOWRES, &stats, NULL);
-    el_timer_register(30000, 0, EL_TIMER_LOWRES, &my_kill, NULL);
+    el_timer_register(10000, 0, EL_TIMER_LOWRES, &my_kill, NULL);
 
 
     /* got into event loop */
