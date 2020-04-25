@@ -896,6 +896,7 @@ struct httpc_query_t {
     bool           clength_hack  : 1;
     bool           query_done    : 1;
     bool           expect100cont : 1;
+    void         * nullable pdata;
 
     void (*nullable on_100cont)(httpc_query_t * nonnull q);
     int (*nullable on_hdrs)(httpc_query_t * nonnull q);
