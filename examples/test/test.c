@@ -60,28 +60,39 @@ static void client_create(const char *s)
     e_info("Client created");
     httpc_cfg_init(&_G.cfg);
     _G.cfg.refcnt++;
-    _G.cfg.max_queries = 100;
-    _G.cfg.pipeline_depth = 10;
+    _G.cfg.max_queries = 10;
     my_addr_resolve(s, &su);
     _G.client = httpc_connect(&su, &_G.cfg, NULL);
 }
 
-static void query_on_done(httpc_query_t *q, httpc_status_t status)
+static int query_on_hdrs(httpc_query_t *q) {
+    e_info("on headers");
+    return 0;
+}
+static int query_on_data(httpc_query_t *q, pstream_t ps)
 {
-    e_info("done %d", status);
-    if (status == HTTPC_STATUS_OK) {
-        _G.ok++;
-    } else {
-        _G.error++;
-    }
+    e_info("on data");
+    e_info("data  %*pM", SB_FMT_ARG(&q->payload));
+    e_info("data ps %*pM", PS_FMT_ARG(&ps));
     if (q->qinfo) {
         e_info("%d", q->qinfo->code);
+        if (q->qinfo->code >= 200 && q->qinfo->code < 400) {
+            _G.ok++;
+        } else {
+            _G.error++;
+        }
     }
+    return 0;
+}
+static void query_on_done(httpc_query_t *q, httpc_status_t status)
+{
+    e_info("done  %*pM", SB_FMT_ARG(&q->payload));
 }
 
 static int fire(void)
 {
     httpc_query_t *query = malloc(sizeof(httpc_query_t));
+    _G.fire++;
     if (!_G.client) {
         e_error("No client");
         client_create(_G.uri.s);
@@ -95,6 +106,8 @@ static int fire(void)
     httpc_query_init(query);
     httpc_bufferize(query, 40 << 20);
     query->on_done = &query_on_done;
+    query->on_data = &query_on_data;
+    query->on_hdrs = &query_on_hdrs;
 
     httpc_query_attach(query, _G.client);
     httpc_query_start(query, HTTP_METHOD_GET, _G.host, LSTR_IMMED_V("/"));
@@ -117,6 +130,11 @@ static void on_term(el_t idx, int signum, data_t priv)
     exit(0);
 }
 
+static void stats(el_t elh, data_t priv)
+{
+    e_info("%03d %03d %03d", _G.fire, _G.ok, _G.error);
+    _G.fire = _G.ok = _G.error = 0;
+}
 static void slice_hook(el_t elh, data_t priv)
 {
     e_info("fire");
@@ -143,7 +161,8 @@ int main(int argc, char **argv)
     el_signal_register(SIGTERM, &on_term, NULL);
     el_signal_register(SIGINT,  &on_term, NULL);
     el_signal_register(SIGQUIT, &on_term, NULL);
-    el_timer_register(2000, 1000, EL_TIMER_LOWRES, &slice_hook, NULL);
+    el_timer_register(2000, 100, EL_TIMER_LOWRES, &slice_hook, NULL);
+    el_timer_register(0, 1000, EL_TIMER_LOWRES, &stats, NULL);
 
 
     /* got into event loop */
