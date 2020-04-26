@@ -22,23 +22,30 @@
 #include <lib-common/datetime.h>
 
 
-static struct {
-    bool is_closing;
-
-    httpc_t *client;
-    lstr_t host;
-    lstr_t uri;
-
-    bool opt_help;
-    bool opt_version;
-    int  fire;
-    int  ok;
-    int  error;
+typedef struct stats_t {
     uint64_t min;
     uint64_t max;
     uint64_t sum;
     uint64_t count;
+} stats_t;
+GENERIC_INIT(stats_t, stats);
 
+static struct {
+    bool is_closing;
+
+    httpc_t *client;
+    lstr_t   host;
+    lstr_t   uri;
+
+    bool     opt_help;
+    bool     opt_version;
+    int      fire;
+    int      ok;
+    int      error;
+
+
+    stats_t  stat;
+    stats_t  stat_global;
 } _G;
 
 /* {{{ utils */
@@ -56,6 +63,17 @@ static void my_addr_resolve(const char *s, sockunion_t *out)
     _G.uri = LSTR(s);
 }
 
+static void compute_stats(stats_t *s, uint64_t response_time)
+{
+    if (!s->count) {
+        s->min = response_time;
+    } else {
+        s->min = MIN(s->min, response_time);
+    }
+    s->max = MAX(s->max, response_time);
+    s->sum += response_time;
+    s->count++;
+}
 /* }}} */
 /*{{{ client */
 static void query_done(httpc_t *c, const httpc_query_t *q, int status)
@@ -92,10 +110,8 @@ static void query_on_done(httpc_query_t *q, httpc_status_t status)
         }
     }
     response_time = lp_getmsec() - (uint64_t)q->pdata;
-    _G.min = MIN(_G.min, response_time);
-    _G.max = MAX(_G.max, response_time);
-    _G.sum += response_time;
-    _G.count++;
+    compute_stats(&_G.stat, response_time);
+    compute_stats(&_G.stat_global, response_time);
     httpc_query_wipe(q);
     p_delete(&q);
 }
@@ -143,11 +159,51 @@ static void my_kill(el_t elh, data_t priv)
 {
     exit(0);
 }
+
+static void
+_stats_print_headers(const char *first, const char *md,
+                     const char *ms, const char *last)
+{
+    printf("%s═══════%s", first, md);
+    printf("═══════%s", md);
+    printf("═══════%s", md);
+    printf("════%s", ms);
+    printf(" 1s %s", ms);
+    printf("════%s", md);
+    printf("════%s", ms);
+    printf(" All ");
+    printf("════%s\n", last);
+    printf("║  Fire ║   OK  ║ Error ");
+    printf("║ Min│ Max│ Avg║ Min│ Max│ Avg║\n");
+    printf("╟───────╫───────╫───────");
+    printf("╫────┼────┼────╫────┼────┼────╢\n");
+}
+static void stats_print_first_header(void)
+{
+    _stats_print_headers("╔", "╦", "╤", "╗");
+}
+static void stats_print_header(void)
+{
+    _stats_print_headers("╠", "╬", "╪", "╣");
+};
+static void stats_print(stats_t *s)
+{
+    printf("║ %03ju",s->min);
+    printf("│ %03ju",s->max);
+    printf("│ %03ju",s->count ? s->sum / s->count : 0);
+}
 static void stats(el_t elh, data_t priv)
 {
-    e_info("%03d %03d %03d %03ju %03ju %03ju", _G.fire, _G.ok, _G.error,
-           _G.min, _G.count ? _G.sum/_G.count:0, _G.max);
-    _G.fire = _G.ok = _G.error = 0;
+    static int nb = 0;
+    if (nb++ > 5) {
+        stats_print_header();
+        nb = 0;
+    }
+    printf("║ %6d║ %6d║ %6d", _G.fire, _G.ok, _G.error);
+    stats_print(&_G.stat);
+    stats_print(&_G.stat_global);
+    printf("║\n");
+    stats_init(&_G.stat);
 }
 static void slice_hook(el_t elh, data_t priv)
 {
@@ -169,7 +225,7 @@ int main(int argc, char **argv)
         e_notice("HELLO - Version 1.0");
         return EXIT_SUCCESS;
     }
-    _G.min = UINT64_MAX;
+    stats_print_first_header();
     client_create(argv[0]);
     fire();
     el_signal_register(SIGTERM, &on_term, NULL);
